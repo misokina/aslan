@@ -1,0 +1,36 @@
+# 运行时数据：日记、记忆、房间事件 —— 都是内容，不是代码
+data/
+
+# 参与者配置和其它本地配置
+config/
+
+# 凭据与本机环境
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# 备份与快照
+*.bak
+*.bak-*
+
+# 依赖（这个库零依赖，但测试或下游可能装东西）
+node_modules/
+.cache/
+.npm/
+
+# agent 的私人上下文：给 agent 读的常驻说明，不是项目文档
+CLAUDE.md
+AGENTS.md
+LUMEN.md
+.claude/
+.codex/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.log

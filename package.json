@@ -1,0 +1,26 @@
+{
+  "name": "promise",
+  "version": "0.1.0",
+  "description": "给 CLI agent 加一层连续性：日记、记忆、召回、上下文整理、定时唤醒，和一个多方共享的群聊房间。零依赖，纯文件。",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "main": "lib/index.js",
+  "scripts": {
+    "test": "node test/pure-logic.js && node test/storage-contract.js && node test/recall-contract.js && node test/wake-contract.js"
+  },
+  "keywords": [
+    "llm-agent",
+    "memory",
+    "continuity",
+    "claude-code",
+    "codex"
+  ],
+  "files": [
+    "lib/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ]
+}
