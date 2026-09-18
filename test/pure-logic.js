@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 'use strict';
 
-// 纯逻辑的断言：触发判断、群聊对话文本、补投挑选。
-// 不碰文件系统、不起服务、不调模型 —— 这三个模块被抽出来，就是为了能这样测。
+// 主要是纯逻辑断言：触发判断、群聊对话文本、补投挑选。
+// 唯一碰文件系统的是「触发理由 → 账本」接缝；它只在系统临时目录真实开账并当场清理。
+// 不起服务、不调模型。
 //
 // ⚠ 这里钉的每一条都对应一次真实的失败或一条容易被「顺手优化」掉的不变量。
 // 如果某条断言看起来多余，先去读它上面那段注释再决定删不删。
 
 const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const consolidation = require('../lib/consolidation');
+const consolidationLedger = require('../lib/consolidate');
 const gc = require('../lib/group-conversation');
 const { pickRetryTarget } = require('../lib/group-retry');
 
@@ -27,7 +32,10 @@ function test(name, fn) {
 // 整理的触发判断
 // ══════════════════════════════════════════════════════════════════
 
-const { evaluateTrigger, normalizeConfig, planTail, buildReceipt, buildSplitReminder } = consolidation;
+const {
+  evaluateTrigger, normalizeConfig, planTail, buildReceipt, buildSplitReminder,
+  OPEN_TRIGGER_REASONS,
+} = consolidation;
 const full = (over) => ({ contextTokens: 190000, contextWindowTokens: 200000, ...over });
 
 test('总开关关着就什么都不触发', () => {
@@ -61,20 +69,89 @@ test('软触发受冷却限制', () => {
   assert.equal(evaluateTrigger(cooling, cfg), null, '冷却期内不该反复软触发');
 });
 
-// ⚠ 跨天比的是**上个整理边界之后新增的量**，不是上下文总量。
-//   拿总量比的话，一个带着大段历史 resume 出来的会话，总量轻松过门槛，
-//   于是「那天一句话都没说」也会被整理一次。
-test('跨天看新增量，不看总量', () => {
-  const cfg = { enabled: true, crossDay: true, minNewTokensForCrossDay: 8000 };
-  const yesterday = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString();
-  const base = { contextTokens: 60000, contextWindowTokens: 200000, lastUpdatedAt: yesterday };
+// ⚠ 运行时可以先压缩自己的上下文，水位因此变低；但没审阅过的原始经历并没有消失。
+//   欠账是第二种「装了多少」，不是日期维度。
+test('低水位也会按未整理欠账触发', () => {
+  const cfg = { enabled: true };
+  const backlog = (eligible) => ({
+    contextTokens: 40000,
+    contextWindowTokens: 258400,
+    eligibleUnreviewedTokens: eligible,
+    unreviewedTokens: eligible + 24000,
+  });
 
-  // 总量 60k 很大，但基准线也是 60k —— 这一天什么都没发生
-  assert.equal(evaluateTrigger({ ...base, baselineTokens: 59000 }, cfg), null,
-    '总量大但没有新增，跨天不该触发 —— 否则空白的日子也会被整理一次');
-  const r = evaluateTrigger({ ...base, baselineTokens: 10000 }, cfg);
-  assert.equal(r && r.reason, 'crossDay');
-  assert.equal(r.newTokens, 50000);
+  assert.equal(evaluateTrigger(backlog(23999), cfg), null, '刚低于一整个尾巴预算不触发');
+  const r = evaluateTrigger(backlog(24000), cfg);
+  assert.equal(r && r.reason, 'backlog', '达到下限就该触发，不能被低水位藏掉');
+  assert.equal(r.eligibleUnreviewedTokens, 24000);
+  assert.equal(r.thresholdTokens, 24000);
+  assert.equal(r.unreviewedTokens, 48000, '原始欠账量也要带回去，方便宿主记录和调阈值');
+});
+
+test('欠账服从冷却且排在水位触发之后', () => {
+  const base = {
+    contextTokens: 40000, contextWindowTokens: 258400, eligibleUnreviewedTokens: 99000,
+  };
+  assert.equal(evaluateTrigger({ ...base, lastConsolidatedAt: new Date().toISOString() }, { enabled: true }), null,
+    '欠账和 soft 同级，冷却期内不能反复开账');
+  assert.equal(evaluateTrigger({ ...base, contextTokens: 200000 }, { enabled: true }).reason, 'soft',
+    '水位已经很高时先报更紧急的 soft');
+  assert.equal(evaluateTrigger({ ...base, contextTokens: 250000 }, { enabled: true }).reason, 'hard',
+    'hard 仍然压过所有理由');
+});
+
+test('欠账阈值不能用 0 悄悄改成永远触发', () => {
+  assert.ok(normalizeConfig({ minRetiredTokens: 0 }).minRetiredTokens >= 500);
+  assert.equal(evaluateTrigger({ contextWindowTokens: 258400, eligibleUnreviewedTokens: 99000 }, { enabled: true }), null,
+    '水位未知时整拍不判断，欠账也不能把 unknown 当成 0');
+});
+
+// ⚠ 这条钉的是两个模块的接缝，不是任何一边自己的功能：
+//   触发器能产出一个 reason，但账本不认识它时，两边的单测都可能各自全绿。
+//   合法集合只能从触发模块导出，测试也遍历同一份集合，不能再手抄第二张表。
+test('每个活跃触发理由都能真实开账，退役理由只读旧账', () => {
+  const tempBase = fs.realpathSync(os.tmpdir());
+  const dir = fs.mkdtempSync(path.join(tempBase, 'promise-trigger-reasons-'));
+  const owner = require('../lib/participant-config').getParticipantConfig().agentIds[0];
+  const opts = { configDir: dir, now: new Date('2026-09-18T00:00:00.000Z') };
+
+  try {
+    assert.ok(OPEN_TRIGGER_REASONS.includes('backlog'), '欠账必须是活跃理由');
+    assert.ok(!OPEN_TRIGGER_REASONS.includes('crossDay'), '跨天理由已经退役，不能再开新账');
+
+    for (const [index, reason] of OPEN_TRIGGER_REASONS.entries()) {
+      const record = consolidationLedger.openConsolidation({
+        owner,
+        source: {
+          kind: 'session', sessionId: `reason-${index}`, fromEvent: 'msg-0', throughEvent: 'msg-1',
+        },
+        trigger: { reason, contextTokens: 100, contextWindowTokens: 1000 },
+      }, opts);
+      assert.equal(record.trigger.reason, reason, `账本必须接受共享注册表里的 ${reason}`);
+    }
+
+    assert.throws(() => consolidationLedger.openConsolidation({
+      owner,
+      source: { kind: 'session', sessionId: 'retired-cross-day', fromEvent: 'msg-0', throughEvent: 'msg-1' },
+      trigger: { reason: 'crossDay', contextTokens: 100, contextWindowTokens: 1000 },
+    }, opts), /Invalid trigger reason: crossDay/, '退役理由不能再开新账');
+
+    const legacySeed = consolidationLedger.openConsolidation({
+      owner,
+      source: { kind: 'session', sessionId: 'legacy-cross-day', fromEvent: 'msg-0', throughEvent: 'msg-1' },
+      trigger: { reason: 'manual', contextTokens: 100, contextWindowTokens: 1000 },
+    }, opts);
+    const legacyPath = path.join(dir, 'consolidations', `${legacySeed.consolidationId}.json`);
+    const legacyRecord = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
+    legacyRecord.trigger.reason = 'crossDay';
+    fs.writeFileSync(legacyPath, `${JSON.stringify(legacyRecord, null, 2)}\n`, 'utf8');
+    assert.equal(consolidationLedger.readConsolidation(legacySeed.consolidationId, opts).trigger.reason, 'crossDay',
+      '退役前已经落盘的账仍然必须可读');
+  } finally {
+    const resolved = fs.realpathSync(dir);
+    assert.equal(path.dirname(resolved), tempBase, '只能清理由本测试建在系统临时目录下的目录');
+    fs.rmSync(resolved, { recursive: true, force: true });
+  }
 });
 
 // ⚠ 留尾巴：整理旧的那段，最近若干条原文原样留着。
@@ -141,6 +218,7 @@ test('配置越界会被夹回合法区间', () => {
 const ledger = (over) => ({
   consolidationId: 'c-1',
   source: { kind: 'session', sessionId: 's-1', fromEvent: 'msg-0', throughEvent: 'msg-24' },
+  trigger: { reason: 'soft', contextTokens: 160000, contextWindowTokens: 200000 },
   diary: { status: 'written', entryId: 'e-1' },
   memory: { status: 'written', ids: ['m-1'] },
   ...over,
@@ -175,9 +253,31 @@ test('没有账本就没有收据，不编一张', () => {
 //   这一层看不见他手上有没有活（一句话说到一半、一个报错还没查完）。
 test('切分提醒把决定权交回去', () => {
   const r = buildSplitReminder(ledger(), 'node bin/split-now.js c-1');
+  assert.ok(r.startsWith('【宿主 提醒】'), '没给人名就不假装这是谁新说的话');
   assert.ok(/你自己定/.test(r), '提醒必须把决定权交回去');
   assert.ok(/不是待办/.test(r), '并且明说它不是一件待办');
   assert.ok(r.includes('node bin/split-now.js c-1'), '要带上原样可执行的那条命令');
+});
+
+test('切分提醒的信封由宿主命名，水位交给当前 agent 判断', () => {
+  const r = buildSplitReminder(
+    ledger(),
+    'node bin/split-now.js c-1',
+    { contextTokens: 20000, contextWindowTokens: 200000, compactionEpoch: 2 },
+    { host: '某宿主', human: '某人' },
+  );
+  assert.ok(r.startsWith('【某宿主 提醒 · 不是 某人 新说的话】'),
+    '纸条占的是平时人说话的位置，宿主知道人名时必须把来源写清');
+  assert.ok(r.includes('10%') && r.includes('20,000 / 200,000'), '要给现在的真实水位');
+  assert.ok(r.includes('开这本账的时候是 80%'), '也要给开账时的水位，变化本身才有判断价值');
+  assert.ok(r.includes('压缩过 **2 次**'), '运行时压缩事实要交给决策者，不能藏在宿主里');
+  assert.ok(r.includes('水位已经不高了'), '低水位时要明说不切也可以');
+  assert.ok(!/【Aslan|Codex|send_to_channel/.test(r), '公共模块不能漏出某个宿主、运行时或工具');
+});
+
+test('水位量不到就不编成 0', () => {
+  const r = buildSplitReminder(ledger(), 'split', { contextTokens: null, contextWindowTokens: 200000 });
+  assert.ok(!r.includes('现在的上下文'), 'unknown 就不显示，不拿 0% 冒充读数');
 });
 
 // ══════════════════════════════════════════════════════════════════
