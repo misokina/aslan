@@ -258,6 +258,66 @@ test('存盘时把旧格式一并写成新格式', () => {
   }
 });
 
+// ── 交接纸条 ──────────────────────────────────────────────────────
+//
+// ⚠ 这几条钉的不是文案，是**纸条和代码之间的那条契约**：
+//   纸条教人怎么改期，而改期到底成不成由 isWakeTerminal 说了算。
+//   两边只要有一边先改，纸条就会变成一句「照做了却不起作用」的指令 —— 而且不报错。
+
+test('交接纸条先说这段字是谁写的', () => {
+  const note = wake.buildHandoff(
+    { id: 'h1', text: '醒来了。今天不用干活。', date: '2026-09-19', time: '09:00' },
+    { host: '某宿主', human: '某人' },
+  );
+  assert.ok(note.startsWith('【某宿主 闹钟交接 · 不是 某人 新说的话】'),
+    '它坐的是「平时人说话」的那个位置，没有信封就会被当成人刚下达的指令');
+  assert.ok(note.includes('醒来了。今天不用干活。'), '上一个他写的原话要原样带着，不能被概括');
+  assert.ok(note.includes('2026-09-19 09:00'), '得说清楚这闹钟本来排在什么时候');
+  assert.ok(note.includes('由你定'), '做不做是他的事 —— 这正是交接而不是重新叫醒的理由');
+});
+
+test('没给人名就不假装有人说过话', () => {
+  const note = wake.buildHandoff({ id: 'h1', text: 'x' }, { host: '宿主' });
+  assert.ok(note.startsWith('【宿主 闹钟交接】'), '不知道那个位置平时是谁，就别编一个名字进去');
+  assert.ok(note.includes('（没写日期）'), '没有日期要如实说，不能拿今天顶上');
+});
+
+test('没有正文就没有纸条', () => {
+  assert.equal(wake.buildHandoff({ id: 'h1' }), null, '空信封不如不发 —— 调用方据此退回原样投递');
+  assert.equal(wake.buildHandoff(null), null);
+});
+
+// ⚠⚠ 这一条是上面那几条里唯一**不测字符串**的：它照着纸条说的做一遍，看闹钟会不会真的再响。
+//   光断言「纸条里出现了 wakeState 和 firedAt」只能证明那两个词在，证明不了那句话是对的。
+test('照纸条说的改期，闹钟真的会再响；只改一半则不会', () => {
+  const at = (offsetMs) => {
+    const d = new Date(Date.now() + offsetMs);
+    const p = (n) => String(n).padStart(2, '0');
+    return { date: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`, time: `${p(d.getHours())}:${p(d.getMinutes())}` };
+  };
+  const fired = {
+    id: 'h1', text: '醒来了', wake: true, done: false,
+    ...at(-60 * 60 * 1000), wakeState: 'delivered', firedAt: new Date().toISOString(),
+  };
+  assert.equal(wake.planTick({ mine: [fired] }).due, null, '已经送达过的条目不该再响');
+
+  // ① 只改时间（纸条里明确警告过的那一半）
+  const halfDone = { ...fired, ...at(-20 * 60 * 1000) };
+  assert.equal(wake.planTick({ mine: [halfDone] }).due, null,
+    '只改 date/time 的话它仍然是终态 —— 纸条必须把这件事说出来，否则人照做了却一声不响地失效');
+
+  // ② 按纸条说的，把两个字段一起删掉
+  const rescheduled = { ...halfDone };
+  delete rescheduled.wakeState;
+  delete rescheduled.firedAt;
+  assert.equal(wake.planTick({ mine: [rescheduled] }).due, rescheduled,
+    '清掉 wakeState 和 firedAt 之后必须真的重新排队 —— 这就是纸条给出的那条指令');
+
+  // ③ 纸条给的另一条出路：不要了就标 done
+  assert.equal(wake.planTick({ mine: [{ ...rescheduled, done: true }] }).due, null,
+    '标了 done 就不该再响');
+});
+
 if (!process.exitCode) {
-  console.log(`Wake contract checks passed (${passed} groups): jitter, fire time, terminal states, migration, tick, recovery, persistence.`);
+  console.log(`Wake contract checks passed (${passed} groups): jitter, fire time, terminal states, migration, tick, recovery, persistence, handoff.`);
 }
