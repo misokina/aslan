@@ -42,6 +42,17 @@ function checkStorage() {
   group.commitDelivery(room, attempt.attemptId, { type: 'assistant-output', runtimeEventType: 'assistant' });
   assert.equal(group.getCursors(room)[first].contextThrough, initial.id);
   assert.equal(group.getCursors(room)[first].memoryThrough, null);
+
+  // 宿主重启时还在跑的投递：调用方传进 activeAttemptIds 的，恢复时不许判成失败
+  const running = group.beginDelivery(room, {
+    who: second, fromExclusive: null, through: initial.id, sessionId: 'test-session-2', runId: 'test-run-2',
+  });
+  const kept = group.recoverDeliveryAttempts(room, { activeAttemptIds: [running.attemptId] });
+  assert.ok(!kept.recovered.failed.includes(running.attemptId),
+    'an attempt the host says is still running must not be failed on recovery');
+  const swept = group.recoverDeliveryAttempts(room);
+  assert.ok(swept.recovered.failed.includes(running.attemptId),
+    'without that hint, a pending attempt with no worker is still failed as before');
   const reply = {
     author: first, text: 'Authorization: Bearer test-only-secret-value',
     episodeId: initial.episodeId, inputThrough: initial.id,

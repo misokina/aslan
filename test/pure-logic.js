@@ -269,6 +269,11 @@ test('切分提醒的信封由宿主命名，水位交给当前 agent 判断', (
   assert.ok(r.startsWith('【某宿主 提醒 · 不是 某人 新说的话】'),
     '纸条占的是平时人说话的位置，宿主知道人名时必须把来源写清');
   assert.ok(r.includes('10%') && r.includes('20,000 / 200,000'), '要给现在的真实水位');
+  assert.ok(r.includes('最近一次量到的上下文') && !r.includes('现在的上下文'),
+    '只能说「最近一次量到的」—— 发这张条子本身就可能触发运行时压缩，宿主承诺不了「现在」');
+  const stamped = buildSplitReminder(ledger(), 'split',
+    { contextTokens: 20000, contextWindowTokens: 200000, observedAt: '2026-09-20T10:00:00+08:00' });
+  assert.ok(stamped.includes('量到的时间 2026-09-20T10:00:00+08:00'), '量到的时间要带上，让读的人自己判断数有多新');
   assert.ok(r.includes('开这本账的时候是 80%'), '也要给开账时的水位，变化本身才有判断价值');
   assert.ok(r.includes('压缩过 **2 次**'), '运行时压缩事实要交给决策者，不能藏在宿主里');
   assert.ok(r.includes('水位已经不高了'), '低水位时要明说不切也可以');
@@ -277,7 +282,8 @@ test('切分提醒的信封由宿主命名，水位交给当前 agent 判断', (
 
 test('水位量不到就不编成 0', () => {
   const r = buildSplitReminder(ledger(), 'split', { contextTokens: null, contextWindowTokens: 200000 });
-  assert.ok(!r.includes('现在的上下文'), 'unknown 就不显示，不拿 0% 冒充读数');
+  // ⚠ 措辞从「现在的上下文」改成了「最近一次量到的上下文」—— 这里跟着改，不然这条永远成立、什么都拦不住
+  assert.ok(!r.includes('量到的上下文') && !r.includes('现在的上下文'), 'unknown 就不显示，不拿 0% 冒充读数');
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -412,11 +418,12 @@ test('参与者可以显式传入，不必去读配置文件', () => {
   }, true, custom);
   assert.ok(line.startsWith('Ann（'), `自定义显示名要生效，实际拿到：${line.slice(0, 20)}`);
 
-  const text = gc.buildGroupConversationText('a1', [{
-    kind: 'message', author: 'ann', text: 'hi', at: '2026-08-30T05:48:58.671+08:00',
-  }], 'room-x', custom);
-  assert.ok(text.includes('Ann、乙都在'), '「谁在房间里」那句要按传入的参与者拼');
-  assert.ok(!text.includes('甲'), '不该把收件人自己也算进「都在」里');
+  // 「谁在房间里」挪进了常驻说明（每个会话只放一次），投递正文里不再每轮重复
+  const brief = gc.buildGroupStandingBrief('a1', custom, { host: '某宿主' });
+  assert.ok(brief.includes('Ann、乙都在'), '「谁在房间里」那句要按传入的参与者拼');
+  assert.ok(!brief.includes('甲'), '不该把收件人自己也算进「都在」里');
+  assert.ok(brief.includes('让 Ann 知道你确实读到了'), '「已读」是给那个人看的，名字也按参与者来');
+  assert.ok(brief.includes('（某宿主）'), '宿主名字由调用方给，公共模块不写死');
 });
 
 test('群聊提示词按参与者生成，不写死名字', () => {
@@ -426,6 +433,21 @@ test('群聊提示词按参与者生成，不写死名字', () => {
   assert.ok(text.includes('在吗'), '原话要原样到达');
   assert.ok(text.includes('main'), '要说明这是哪个房间');
   assert.ok(text.includes(gc.GROUP_SILENCE_MARKER), '必须告诉它沉默怎么写，否则沉默不是真的免费');
+});
+
+test('投递正文只留硬协议，软规则在常驻说明里', () => {
+  const text = gc.buildGroupConversationText('dawn', [{
+    kind: 'message', author: 'owner', text: '在吗', at: '2026-08-30T05:48:58.671+08:00',
+  }], 'main');
+  assert.ok(text.includes('不要续写下一次投递'),
+    '出过一次事：模型接着正文把下一条投递（连同别人的「发言」）编了出来 —— 这句必须紧挨着原话');
+  assert.ok(text.includes(gc.GROUP_SEEN_MARKER), '已读记号也影响落盘，和沉默一样属于硬协议');
+  assert.ok(!text.includes('不是汇报') && !text.includes('<details>'),
+    '软规则每轮重贴会在一个 resume 的会话里堆几百遍（实测占投递文本 74%），只放在常驻说明里');
+  const brief = gc.buildGroupStandingBrief('dawn');
+  for (const rule of ['不是汇报', gc.GROUP_SILENCE_MARKER, gc.GROUP_SEEN_MARKER, '<details>', '别贴密钥']) {
+    assert.ok(brief.includes(rule), `常驻说明里要有：${rule}`);
+  }
 });
 
 test('没有未读就不生成提示词', () => {

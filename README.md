@@ -56,14 +56,21 @@
 这个切分不是为了好看：**最容易被「顺手优化」掉的恰恰是那几条不变量**，
 而它们只有可测才守得住。
 
-命令：`bin/recall.js`（关键词召回）、`bin/split-now.js`（agent 自己确认可以切上下文了）。
+命令：
+
+| 命令 | 做什么 |
+|---|---|
+| `bin/mcp-memory.js` | 记忆的 MCP server：**按意思召回**（只回摘要）、读正文、给自己的记忆改标签（覆盖不删） |
+| `bin/recall.js` | 关键词召回（字面匹配）；也是上面那个在没有 key、或者判断服务挂了时的退路 |
+| `bin/memory-check.js` | 记忆体检：哪些写重了、哪些被推翻了、哪些两个人都记了、哪些该互相链接 |
+| `bin/split-now.js` | agent 自己确认可以切上下文了 |
 
 ---
 
 ## 用
 
 ```bash
-npm test        # 纯逻辑 40 + 存储契约 + 召回 13 + 唤醒 29
+npm test        # 纯逻辑 41 + 存储契约 + 召回 13 + 唤醒 29 + 记忆 MCP 7（判断服务全是本地假的，不往外发）
 ```
 
 ```js
@@ -113,6 +120,34 @@ const ranked = recall.rankMemories(
 
 不配也能跑，用的就是上面这套默认值。
 
+### 记忆 MCP（按意思召回）
+
+```json
+{ "mcpServers": { "memory": { "command": "node", "args": ["bin/mcp-memory.js"],
+  "env": { "ASLAN_MEMORY_WHO": "dawn", "JEV_API_KEY_FILE": "/path/to/jev-key", "GEMINI_API_KEY_FILE": "/path/to/gemini-key" } } } }
+```
+
+每个 agent 的记忆在 `<记忆根>/<他的 id>/` 下（记忆根默认 `data/memory`，`ASLAN_SHARED_MEMORY_DIR` 可改）。
+召回时由 agent 先写一句「我想找什么」，可以拆成几条；每条带一个类型：
+
+- `thing`：找讲这件事、或者能解释它的记忆（默认）；
+- `cause`：找可能导致它的「那件事」。
+
+类型决定判断怎么问（见下面「判断器怎么问」那条）。「关于谁」用侧车里的 `about` 标签先筛。
+判断默认交给 Jev；它挂了退到 Gemini 的向量检索，再不行退到 `bin/recall.js` 的字面匹配，**退了会在回复里说**。
+默认只搜自己的记忆；想看另一个 agent 当时自己怎么想，显式传 `include_other`。
+
+⚠ 按意思召回会把候选记忆的**名字 + 一句话描述**和意图发给 Jev（typesafe.ai）和 Google；正文不发。
+不想往外发就设 `ASLAN_MEMORY_SEMANTIC=off`，只走字面匹配。
+其它环境变量（代理、接口地址、key 的几种放法）写在 `bin/mcp-memory.js` 开头。
+
+### 群聊：投递正文 + 常驻说明
+
+`buildGroupConversationText` 只放**这一轮的原话和几句硬协议**（别续写下一次投递、沉默和已读怎么写）；
+语气、分段、脱敏、折叠这些软规则在 `buildGroupStandingBrief(who)` 里，
+**由宿主放进系统提示层、每个会话放一次**（比如 Claude Code 的 `--append-system-prompt`）。
+两边要放同一份正文，漂移了没人会发现。
+
 ---
 
 ## 几条撞出来的设计
@@ -159,6 +194,67 @@ const ranked = recall.rankMemories(
 
 **留尾巴至少留一条。** 最新那条自己就超预算时也不能悄悄变成 0 ——
 那等于退回「只给一张收据」，而「刚才那个」会失去落点。超了就如实标 `budgetExceeded`。
+
+**判断器怎么问，比交给谁更重要。** 同一个判断模型，在构造的因果题上（原因和结果一个字都不重合，
+旁边放着字面沾边的干扰项）：通用问法「这条值不值得拿出来看」只对 1/5，专门问「这条是不是一个可能原因」5/5；
+向量检索也是 1/5 —— 它每次都把字面沾边的排第一（搜「肾虚」排出「肾脏的位置」）。
+所以意图要带类型，类型决定问法。⚠ 但因果问法对「教训」类的记忆会普遍给高分，找教训仍然用 `thing`。
+这几道题是自己出的、数量很少，因果问法也是看到失败之后才加的 —— 当成一个方向，不是定论。
+
+**投递正文只留硬协议。** 软规则原来拼在每条群聊投递的末尾，一条 558 字符；
+一个一直 resume 的会话里它堆了三百多遍，占了那条线程全部投递文本的 74%。
+更糟的是，每轮重复的模板正是最好续写的那部分 —— 出过一次事：模型接着正文，
+把「下一条投递」（连同这段说明和一句别人的「发言」）整个编了出来。现在正文紧跟一句「不要续写下一次投递」，
+其余的挪进常驻说明。
+
+**退路要说出来。** 判断服务超时、换成向量，结果的排序会变，可回复长得一模一样。
+所以每一次退都写进回复里；测试也钉着这一条 —— 悄悄换掉的退路，和「一切正常」在外面看不出区别。
+
+---
+
+## 参考过的项目和论文
+
+多数只是借了想法，没有抄代码；借了具体东西的写在后面。
+
+**论文**
+
+- Park et al., *Generative Agents: Interactive Simulacra of Human Behavior*（2023，[arXiv:2304.03442](https://arxiv.org/abs/2304.03442)）——
+  保留完整的事件流、定期反思；召回打分里「新近 + 重要 + 相关」的形状。
+- Packer et al., *MemGPT: Towards LLMs as Operating Systems*（2023，[arXiv:2310.08560](https://arxiv.org/abs/2310.08560)）——
+  上下文和外部存储两层，让模型自己调函数去翻：召回由 agent 自己调，而不是自动塞进上下文。
+- Zhong et al., *MemoryBank: Enhancing Large Language Models with Long-Term Memory*（2023，[arXiv:2305.10250](https://arxiv.org/abs/2305.10250)）——
+  每日摘要和按遗忘曲线衰减。日记借了前一半；衰减想过，暂时不做。
+- Xu et al., *A-MEM: Agentic Memory for LLM Agents*（2025，[arXiv:2502.12110](https://arxiv.org/abs/2502.12110)）——
+  一张卡片 = 摘要 + 标签 + 链接；先粗筛、再让模型判断是真相关还是表面相似。
+- Rasmussen et al., *Zep: A Temporal Knowledge Graph Architecture for Agent Memory*（2025，[arXiv:2501.13956](https://arxiv.org/abs/2501.13956)）——
+  时间是一等维度，冲突时把旧的标成失效而不是删掉：标签的「覆盖不删」。
+- Chhikara et al., *Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory*（2025，[arXiv:2504.19413](https://arxiv.org/abs/2504.19413)）——
+  向量 + 图的双存储那一路。作为对照看过，没走。
+- Mao et al., *Multi-User Chat Assistant (MUCA): a Framework Using LLMs to Facilitate Group Conversations*（2024，[arXiv:2401.04883](https://arxiv.org/abs/2401.04883)）——
+  把多人聊天拆成「说什么 / 什么时候说 / 对谁说」。
+
+**项目**
+
+- [Graphiti](https://github.com/getzep/graphiti)：`bin/memory-check.js` 里「重复」和「推翻」的判断标准，改写自它的去重提示词；
+  「一条可以同时是重复和被取代」、两种判断的候选集故意不对称，也是从它那里读来的。
+- [Letta](https://github.com/letta-ai/letta)、[LangGraph](https://github.com/langchain-ai/langgraph)、Memori：怎么切存储 ——
+  最后定的是「内容用可读文件，只有需要事务和查询的机器状态才进库」。
+- [agentmemory](https://github.com/jayzeng/agentmemory)：目录形状和这里几乎一样（索引 + 每日文件 + 标签 + 双链），
+  它把检索做成一层可以摘掉的东西。撞到这个程度，说明这是一个收敛的解。
+- [homunculus](https://github.com/yerph/homunculus)：宿主的形状最像的一个；agent 自己排下一次唤醒。
+- [agent-room-cli](https://github.com/AliceLJY/agent-room-cli)、agentchat（Yrzhe）、agent-room（alkl）、
+  [AutoGen](https://github.com/microsoft/autogen) / AG2 的 GroupChat：群聊的点名路由、在场方式、
+  什么时候停（以及一个已知的静默死循环）。
+- Codex CLI 本地的记忆任务表：整理账本该有的字段（租约、所有权令牌、两个水位）。
+- [lemmalog](https://github.com/JordyZomer/lemmalog)、[agent-log-replayer](https://github.com/opaopa6969/agent-log-replayer)：
+  事件溯源和回放 —— 「回忆时按当时的版本重放」这个还停在想法阶段的方向。
+- 文章：Linq 的群聊 agent 实践（「到底该不该说话」）；Matt Webb 在 interconnected.org 上的多 bot 聊天室复盘（2025）。
+- ChatGPT 的记忆：「先写清楚想找什么、再去检索」这个做法的出发点。
+
+**用到的服务**
+
+- [TypeSafe](https://typesafe.ai) 的 Jev：召回时判断相关、体检时判断重复和推翻。只出校准概率，不出文本。
+- Google 的 Gemini embedding（`gemini-embedding-2`）：召回的向量退路。
 
 ---
 

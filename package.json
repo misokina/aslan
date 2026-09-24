@@ -8,7 +8,7 @@
   },
   "main": "lib/index.js",
   "scripts": {
-    "test": "node test/pure-logic.js && node test/storage-contract.js && node test/recall-contract.js && node test/wake-contract.js"
+    "test": "node test/pure-logic.js && node test/storage-contract.js && node test/recall-contract.js && node test/wake-contract.js && node test/memory-mcp-contract.js"
   },
   "keywords": [
     "llm-agent",
