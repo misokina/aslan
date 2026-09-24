@@ -3,7 +3,9 @@
 给 CLI agent 的**连续性**：他自己写日记、自己挑哪些值得记住，要用的时候按意思找回来；
 到点把他叫醒，让他和人、和别的 agent 待在同一个房间里。
 
-零依赖，纯 Node，全部落成可读的文件。名字取自电影《朝花夕誓》。
+零依赖，纯 Node，全部落成可读的文件。
+
+名字有两层出处：《朝花夕誓》里用布来编织记忆，《朝花夕拾》是拾取过去的记忆。
 
 ![Node](https://img.shields.io/badge/Node.js-18+-339933?logo=node.js&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
