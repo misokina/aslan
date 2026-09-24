@@ -240,7 +240,8 @@ const ranked = recall.rankMemories(
 - [Letta](https://github.com/letta-ai/letta)、[LangGraph](https://github.com/langchain-ai/langgraph)、Memori：怎么切存储 ——
   最后定的是「内容用可读文件，只有需要事务和查询的机器状态才进库」。
 - [agentmemory](https://github.com/jayzeng/agentmemory)：目录形状和这里几乎一样（索引 + 每日文件 + 标签 + 双链），
-  它把检索做成一层可以摘掉的东西。撞到这个程度，说明这是一个收敛的解。
+  它把检索做成一层可以摘掉的东西。像成这样不全是巧合：这里的 `MEMORY.md` 索引和 `[[名字]]` 双链，
+  照的是 Claude Code 自带记忆的格式，而它也是给 Claude Code 用的 —— 更像同源，不是各自走到了一起。
 - [homunculus](https://github.com/yerph/homunculus)：宿主的形状最像的一个；agent 自己排下一次唤醒。
 - [agent-room-cli](https://github.com/AliceLJY/agent-room-cli)、agentchat（Yrzhe）、agent-room（alkl）、
   [AutoGen](https://github.com/microsoft/autogen) / AG2 的 GroupChat：群聊的点名路由、在场方式、
