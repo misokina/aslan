@@ -1,7 +1,7 @@
 {
   "name": "promise",
   "version": "0.1.0",
-  "description": "给 CLI agent 加一层连续性：日记、记忆、召回、上下文整理、定时唤醒，和一个多方共享的群聊房间。零依赖，纯文件。",
+  "description": "给 CLI agent 的连续性：他自己写日记、自己挑哪些值得记住，按意思找回来；到点叫醒他，和人、和别的 agent 待在同一个房间里。零依赖，纯文件。",
   "license": "MIT",
   "engines": {
     "node": ">=18"
