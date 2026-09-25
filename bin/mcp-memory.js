@@ -418,8 +418,20 @@ const LEGEND = {
   lit: '这次是字面匹配：要用描述里原本的词才找得到。',
 };
 
+// 正文的旧版本：覆盖正文时，旧的一版存到 meta/history/<名字>@<时间>.md，新版里写一句指过去。
+// 在这之前只有标签留底，正文是原地改的 —— 新的不会指向被覆盖的那一版。
+function bodyVersions(dir, name) {
+  try {
+    return fs.readdirSync(path.join(dir, 'meta', 'history'))
+      .filter((f) => f.startsWith(`${name}@`) && f.endsWith('.md')).sort();
+  } catch { return []; }
+}
+
 function renderRecall(list, header, notes, ev, multi, lead) {
-  const lines = list.map((c, i) => {
+  // 衰退了的（收起来的）排到后面 —— 不删也不藏，召回时照样出现
+  const isFaded = (c) => { const s = readSidecar(c.dir, c.name); return Boolean(s.tags && s.tags.faded === true); };
+  const ordered = [...list.filter((c) => !isFaded(c)), ...list.filter(isFaded)];
+  const lines = ordered.map((c, i) => {
     const e = ev && ev.get(c.key);
     const parts = [];
     if (e) {
@@ -430,7 +442,9 @@ function renderRecall(list, header, notes, ev, multi, lead) {
     // 「谁写的」和「讲的是谁」分开显示：[id] 是谁写的，「关于」是讲的是谁
     const aboutText = c.about.length ? ` · 关于 ${c.about.join('、')}` : '';
     // 标签改过的，多一行「底下还有」—— 不提示的话，覆盖过的和从没变过的长得一样
-    const hint = tagHint(readSidecar(c.dir, c.name));
+    const versions = bodyVersions(c.dir, c.name).length;
+    const hint = [tagHint(readSidecar(c.dir, c.name)), versions ? `正文覆盖过 ${versions} 次，旧版在 meta/history` : '']
+      .filter(Boolean).join('；');
     return `${i + 1}. [${c.who}] ${c.name}${parts.length ? `（${parts.join('，')}）` : ''}${aboutText}\n`
       + `   ${c.desc || '(没有 description)'}${hint ? `\n   ↳ ${hint}` : ''}`;
   });
@@ -454,7 +468,11 @@ function doRead({ name, who }) {
     ? `${text.slice(0, MAX_BODY)}\n\n…（正文被截断，原文 ${text.length} 字符，在 ${file}）`
     : text;
   // 标签和它们的全部历史 —— 「底下还有东西」要能抓得到，不能只在召回时说一句
-  const withTags = body + tagReport(readSidecar(target, n));
+  const versions = bodyVersions(target, n);
+  const withTags = body + tagReport(readSidecar(target, n))
+    + (versions.length
+      ? `\n\n── 正文旧版（覆盖前的样子，从旧到新）──\n${versions.map((f) => `  ${path.join(target, 'meta', 'history', f)}`).join('\n')}`
+      : '');
   // ⚠ 外面照读不拦，只把提醒带上 —— 管的是往外说多少，不是能看多少
   return SCOPE === 'outside' ? `${withTags}\n\n${OUTSIDE_NOTE}` : withTags;
 }
@@ -533,6 +551,7 @@ const moodLabel = (m) => `${DIRECTION_LABEL[m.direction]}·${STRENGTH_LABEL[m.st
 // 召回时那一行：改过几次、心情现在是什么、**以前的里同一类占多少**、有没有强烈的
 function tagHint(side) {
   const parts = [];
+  if (side.tags && side.tags.faded === true) parts.push('这条衰退了（收起来了，没删）');
   const changes = Array.isArray(side.tagHistory) ? side.tagHistory : [];
   const moods = validMoods(side);
   const overwrites = changes.length + Math.max(0, moods.length - 1);
@@ -570,6 +589,7 @@ function tagReport(side) {
   if (side.occurredAt) lines.push(`发生：${side.occurredAt}`);
   if (Array.isArray(tags.topic) && tags.topic.length) lines.push(`话题：${tags.topic.join('、')}`);
   if (typeof tags.place === 'string' && tags.place) lines.push(`地点：${tags.place}`);
+  if (tags.faded === true) lines.push('状态：衰退（收起来了，没删）');
   const moods = validMoods(side);
   if (moods.length) {
     lines.push('心情（从旧到新，最后一条是现在的）：');
@@ -587,7 +607,7 @@ function tagReport(side) {
   return lines.length ? `\n\n── 标签 ──\n${lines.join('\n')}` : '';
 }
 
-async function doTag({ name, about, occurredAt, mood, why }) {
+async function doTag({ name, about, occurredAt, mood, faded, why }) {
   const n = String(name || '').trim();
   if (!/^[A-Za-z0-9._-]+$/.test(n) || n.includes('..')) throw new Error(`名字不合法：${name}`);
   // ⚠ 只改自己的。别人的记忆由他自己标 —— 这里绝不写别人的目录
@@ -612,8 +632,9 @@ async function doTag({ name, about, occurredAt, mood, why }) {
     const word = typeof m.note === 'string' ? m.note.trim().slice(0, 20) : '';
     if (word) moodEntry.note = word;
   }
-  if (nextAbout === null && occurredAt === undefined && !moodEntry) {
-    throw new Error('什么都没给：about / occurredAt / mood 至少给一个');
+  if (faded !== undefined && typeof faded !== 'boolean') throw new Error('faded 只能是 true 或 false');
+  if (nextAbout === null && occurredAt === undefined && !moodEntry && faded === undefined) {
+    throw new Error('什么都没给：about / occurredAt / mood / faded 至少给一个');
   }
 
   return withEntryLock(MEMORY_DIR, n, () => {
@@ -640,6 +661,12 @@ async function doTag({ name, about, occurredAt, mood, why }) {
       // 心情永远是**追加**：现在的是最后一条，以前的全在前面
       side.moodHistory = [...(Array.isArray(side.moodHistory) ? side.moodHistory : []), stamp({ ...moodEntry, at, by: WHO })];
       changed.push('心情');
+    }
+    // 衰退：收起来，不删。和别的标签一样留旧值和时间
+    if (faded !== undefined && (side.tags.faded === true) !== faded) {
+      history.push(stamp({ field: 'faded', from: side.tags.faded === true, to: faded, at, by: WHO }));
+      if (faded) side.tags.faded = true; else delete side.tags.faded;
+      changed.push(faded ? '衰退' : '取消衰退');
     }
     if (!changed.length) return `没有变化：${n} 的标签和现在一样。`;
     if (history.length) side.tagHistory = history;
@@ -668,7 +695,7 @@ const TOOLS = [
       '⚠ 返回的是候选，不是答案。分数是相关的概率，标「低」的不一定相关。看到相关的再调 read_memory 取正文。',
       '⚠ 召回不到不等于没有 —— 换个说法再试，报「没有」之前说清楚找了什么。',
       '⚠ 会把候选记忆的名字和一句话描述发给 Jev（typesafe）和 Google；正文不发。',
-      '带「↳」那一行的，是标签改过或标过心情的：旧的都还在，read_memory 能看到全部历史。',
+      '带「↳」那一行的，是标签改过、标过心情、衰退了、或者正文覆盖过的：旧的都还在，read_memory 能看到全部历史。',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -712,12 +739,13 @@ const TOOLS = [
   {
     name: 'tag_memory',
     description: [
-      '给**自己的**一条记忆改标签：关于谁、发生日期、心情。**覆盖不删** —— 旧值和改的时间都留着，',
+      '给**自己的**一条记忆改标签：关于谁、发生日期、心情、衰退。**覆盖不删** —— 旧值和改的时间都留着，',
       '召回时会提示「改过」，read_memory 能看到全部历史。',
       '',
       '心情**不是必填，也不是义务**：想标的时候才标。知道是什么心情，就把名字写进 note（比如「开心」「委屈」）；',
       '不知道具体是什么时，只记强弱和方向也行。强弱是 strong / mild，方向是 + 正 / - 负 / ± 混。',
       '回忆起一件事、觉得现在是不一样的心情，就再标一次 —— 以前的都在，召回时能看到各类占多少。',
+      '衰退（faded: true）：这条收起来了 —— 不删，召回时照样出现，只是排在后面、标一句「衰退了」。给 false 取消。',
     ].join('\n'),
     inputSchema: {
       type: 'object',
@@ -737,6 +765,7 @@ const TOOLS = [
           },
           required: ['strength', 'direction'],
         },
+        faded: { type: 'boolean', description: '衰退：收起来，不删。召回时排在后面、标出来。false 取消。' },
         why: { type: 'string', description: '为什么改，可以不写。' },
       },
       required: ['name'],

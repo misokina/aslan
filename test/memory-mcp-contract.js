@@ -191,6 +191,23 @@ group('tags overwrite, never delete, never touch others', async () => {
   const after = await mcp([call(1, 'recall_memory', { query: 'plain-note' }), call(2, 'read_memory', { name: 'plain-note' })], baseEnv());
   assert.ok(/↳ .*改过/.test(text(after, 1)), '改过的要在召回时说「底下还有」');
   assert.ok(/── 标签 ──/.test(text(after, 2)) && /回头看没那么可怕/.test(text(after, 2)), 'read_memory 要回全部历史');
+
+  // 衰退 + 正文旧版：收起来不删，召回照样出现、排在后面；正文覆盖前的那一版要指得到
+  const historyDir = path.join(mine, 'meta', 'history');
+  fs.mkdirSync(historyDir, { recursive: true });
+  fs.writeFileSync(path.join(historyDir, 'plain-note@2026-09-25T08-00.md'), '覆盖前\n', 'utf8');
+  const fade = await mcp([
+    call(1, 'tag_memory', { name: 'plain-note', faded: true }),
+    call(2, 'tag_memory', { name: 'plain-note', faded: 'no' }),
+  ], baseEnv());
+  assert.ok(/衰退/.test(text(fade, 1)), '衰退能标');
+  assert.ok(fade.get(2)?.result?.isError, 'faded 只能是 true / false');
+  const seen = await mcp([call(1, 'recall_memory', { query: 'plain-note' }), call(2, 'read_memory', { name: 'plain-note' })], baseEnv());
+  assert.ok(/衰退了/.test(text(seen, 1)) && /正文覆盖过 1 次/.test(text(seen, 1)), '衰退的照样召回得到；正文覆盖过要说出来');
+  assert.ok(/状态：衰退/.test(text(seen, 2)) && /plain-note@2026-09-25T08-00\.md/.test(text(seen, 2)), 'read_memory 要指得到旧版');
+  const undo = await mcp([call(1, 'tag_memory', { name: 'plain-note', faded: false })], baseEnv());
+  assert.ok(/取消衰退/.test(text(undo, 1)), '衰退可以取消');
+  fs.rmSync(historyDir, { recursive: true, force: true });
 });
 
 group('type decides how Jev is asked; Jev leads the order', async () => {
